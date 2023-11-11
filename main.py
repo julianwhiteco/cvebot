@@ -1,11 +1,30 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import re
+import telebot
+import sys
+import time
+
+
+# todo section
+# - create an /about handler that prints about (author, data source) and current config ie rate limiting (6 requests per 60 secs)
+# - add a keyboarding option - start with 'new search'
+
+
+if len(sys.argv) < 2:
+    print("Usage: python app.py <API_KEY>")
+    sys.exit(1)
+api_key = sys.argv[1]
+
+user_requests = {}
+REQUEST_LIMIT = 6
+TIME_LIMIT = 60
 
 
 # Input validator
 def lookup_check(term):
-    print(f"Input: {term}")
+    # print(f"Input: {term}")
     # Replace spaces with '-' if term is like 'CVE 2022 37971'
     if re.match(r'^CVE \d{4} \d+$', term):
         term = term.replace(' ', '-')
@@ -24,7 +43,7 @@ def lookup_check(term):
     elif re.match(r'^\d{4} \d+$', term):  # if term is like '2023 38245'
         term = "CVE-" + term.replace(' ', '-')  # format it as 'CVE-2023-38245'
 
-    print(f"Output: {term}")
+    # print(f"Output: {term}")
     return term
 
 
@@ -59,8 +78,6 @@ def get_table_data(soup):
         cve_id = row_data[0]
         url = base_url + cve_id
         explanation = row_data[-1].split('. ')[0] + '.'  # Keep text only before the first "."
-        if len(explanation) > 100:  # Truncate explanation if longer than 100 characters
-            explanation = explanation[:97] + '...'  # Include '...' in the 100 characters
         row_data[-1] = url
         row_data.append(explanation)
         table_data.append(row_data)
@@ -69,51 +86,81 @@ def get_table_data(soup):
 
 
 # Run this via telegram; if it returns table send to user. 0 is no response. And 1 contains illegal char.
-def main(search_term):
-    # Base URL
-    url = 'https://www.opencve.io/cve'
-
-    # Query parameters
-    formatted_term = lookup_check(str(search_term))
-    print(formatted_term)
-
+def main_check(search_term):
+    formatted_term = lookup_check(search_term)
     if formatted_term is None:
-        print(f"Error: Your search '{search_term}' contained an illegal character.")
-        return 1
+        return 1, f"Error: Your search '{search_term}' contained an illegal character.", None, None
+
+    params = {'cvss': '', 'search': formatted_term}
+    try:
+        response = requests.get('https://www.opencve.io/cve', params=params, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        return -1, str(e), None, None
+    total = get_total(response.text)
+    url = response.url  # store the URL
+    if total == 0:
+        return 0, "No results found.", total, url
     else:
-        params = {
-            'cvss': '',
-            'search': formatted_term
-        }
-
-        url = 'https://www.opencve.io/cve'
-        response = requests.get(url, params=params)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table_data = get_table_data(soup)
+        return 2, table_data, total, url  # return the URL
 
 
-        # Start...
-        print(f'Searching for: {formatted_term}')
+def format_cve_data(row):
+    cve_id, _, product, date, _, score, url, description = row
+    vendor_match = re.search(r'\d (.+)', row[1])
+    vendor = vendor_match.group(1) if vendor_match is not None else ''
+    product_match = re.search(r'\d (.+)', product)
+    product = product_match.group(1) if product_match is not None else product
+    product_vendor_text = ''
+    if product or vendor:
+        product_vendor_text = f"<i>{product} ({vendor})</i>\n" if vendor else f"{product} "
+    description = description if len(description) <= 120 else description[:117] + "..."
+    message = (
+        f'<b><a href="{url}">{cve_id}</a></b>\n'
+        f"{product_vendor_text}"
+        f"Reported {date} | "
+        f"<b>Score:</b> {score.split(' ')[0]} \n"
+        f"{description} "
+        f' <a href="{url}">read more</a>'
+    )
+    return message
 
-        # Call the get_total function to get the total number of results
-        total = get_total(response.text)
 
-        # Proceed only if total is greater than 0
-        if total > 0:
-            print(f'Total number of results: {total}')
-            soup = BeautifulSoup(response.text, 'html.parser')
-            table_data = get_table_data(soup)
-            # for row_data in table_data:
-            #     print(row_data)
+def main():
+    bot = telebot.TeleBot(api_key)
 
-            # Print the URL for continuing reading - do this via telegram bot stage.
-            print(total)
-            if total > 5:
-                print(f"More results at: {response.url}")
-            return total, table_data
+    @bot.message_handler(func=lambda message: True)
+    def handle_message(message):
+        user_id = message.from_user.id
+        current_time = time.time()
 
+        if user_id in user_requests:
+            last_request_time, request_count = user_requests[user_id]
+            if current_time - last_request_time < TIME_LIMIT:
+                if request_count >= REQUEST_LIMIT:
+                    bot.reply_to(message, "Request limit exceeded. Please wait a minute.")
+                    return
+                user_requests[user_id] = (last_request_time, request_count + 1)
+            else:
+                user_requests[user_id] = (current_time, 1)
         else:
-            print("No results found.")
-            return 0
+            user_requests[user_id] = (current_time, 1)
+
+        result_code, result_data, total, url = main_check(message.text)
+
+        if result_code == 0 or result_code == 1:
+            bot.reply_to(message, result_data)
+        elif result_code == 2:
+            formatted_data = "\n\n".join(format_cve_data(row) for row in result_data)  # formatting each row
+            reply = f"<b>Total Results: </b>{total}\nLatest:\n\n{formatted_data}"
+            if total > 5:  # only include the URL if total is greater than 5
+                reply += f"\n\nMore results at: {url}"
+            bot.send_message(message.chat.id, reply, parse_mode='HTML', disable_web_page_preview=True)
+
+    bot.polling(none_stop=True)
 
 
-# main(str("microsoft"))
-print(main(str("microsoft")))
+main()
+
