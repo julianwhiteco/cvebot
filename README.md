@@ -3,3 +3,6 @@ Empowering users to swiftly search for crucial vulnerability information related
 
 # docker
 todo
+
+### Legal & Disclosures
+- This product uses data from the NVD API but is not endorsed or certified by the NVD.
