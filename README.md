@@ -1,5 +1,7 @@
 # cvebot
-Empowering users to swiftly search for crucial vulnerability information related to specific products or vendors via Telegram.
+CVE Bot provides an easy interface to track vendor & product vulnerabilities, as well as research CVEs. Utilises the US Gov NIST NVD.
+
+Work in Progress.
 
 # Running
 **Docker**: todo
