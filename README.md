@@ -3,6 +3,7 @@ Empowering users to swiftly search for crucial vulnerability information related
 
 # Running
 **Docker**: todo
+
 **Locally**: todo
 
 ### Legal & Disclosures
